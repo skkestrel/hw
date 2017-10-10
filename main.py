@@ -56,17 +56,20 @@ def process_symbols(data):
 class Sequence(nn.Module):
     def __init__(self):
         super(Sequence, self).__init__()
-        self.lstm1 = nn.LSTMCell(6, 32)
+        self.lstm1 = nn.LSTMCell(1, 32)
         self.lin = nn.Linear(32, 1)
 
-    def forward(self, input):
+    def forward(self, input, future=0):
         outputs = []
         h_t = Variable(torch.zeros(input.size(0), 32), requires_grad=False).float().cuda()
         c_t = Variable(torch.zeros(input.size(0), 32), requires_grad=False).float().cuda()
-        A = Variable(torch.zeros(input.size(0), 1)).cuda()
 
-        for i, input_t in enumerate(input.chunk(input.size(1), dim=1)):
-            h_t, c_t = self.lstm1(input_t, (h_t, c_t))
+        for i in range(input.size(1)):
+            h_t, c_t = self.lstm1(input[:, i, :], (h_t, c_t))
+            A = self.lin(h_t)
+            outputs += [A]
+        for i in range(future):
+            h_t, c_t = self.lstm1(A, (h_t, c_t))
             A = self.lin(h_t)
             outputs += [A]
         outputs = torch.stack(outputs, 1).squeeze(2)
@@ -82,9 +85,6 @@ prediction_length = 28
 data = load_symbols('data/daily')
 process_symbols(data)
 
-plt.plot(data[0].data)
-plt.show()
-
 train = data[4:]
 test = data[:4]
 
@@ -95,32 +95,23 @@ seq.cuda()
 optimizer = optim.Adam(seq.parameters())
 
 for i in range(10):
-    np.random.shuffle(train)
-
-    for j in range(0, len(train), batch_size):
-        for i in range(10):
-            batch = []
-            for k in train[j:j+batch_size]:
-                start = np.random.randint(0, k[1].shape[0] - prediction_length)
-                batch.append(k[1][start:start+prediction_length])
-            input = Variable(torch.from_numpy(np.stack(batch, axis=0)), requires_grad=False).float().cuda()
-
-            def closure():
-                optimizer.zero_grad()
-                out = seq(input)
-                loss = torch.nn.functional.mse_loss(input[:, 1:, 2], out[:, :-1])
-                print('loss:', loss.data)
-                loss.backward()
-                return loss
-            optimizer.step(closure)
-
     batch = []
-    for k in test:
-        batch.append(k[1][100:100+prediction_length])
-    input = Variable(torch.from_numpy(np.stack(batch, axis=0)), requires_grad=False).float().cuda()
+    for k in train[0:1]:
+        batch.append(k.data[:-100, -1].reshape((-1, 1)))
+    input = Variable(torch.from_numpy(np.stack(batch, axis=0)), requires_grad=True).float().cuda()
 
-    out = seq(input)
+    def closure():
+        optimizer.zero_grad()
+        out = seq(input)
+        loss = torch.nn.functional.mse_loss(input[:, 1:, 0], out[:, :-1])
+        print('loss:', loss.data[0])
+        loss.backward()
+        return loss
+    optimizer.step(closure)
+
+    out = seq(input, future=100)
+
     plt.figure()
-    plt.plot(range(0, prediction_length-1), input[:, 1:, 2].data.cpu().numpy().T)
-    plt.plot(range(1, prediction_length), out[:, :-1].data.cpu().numpy().T)
+    plt.plot(range(0, k.data.shape[0]), k.data[:, -1])
+    plt.plot(range(0, k.data.shape[0]), out.data.cpu().numpy()[0, :])
     plt.show()
