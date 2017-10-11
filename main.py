@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
+import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import matplotlib
@@ -53,28 +54,36 @@ def process_symbols(data):
         table = np.concatenate([table, pivot], axis=1)
         i.data = table
 
-class Sequence(nn.Module):
-    def __init__(self):
-        super(Sequence, self).__init__()
-        self.lstm1 = nn.LSTMCell(1, 32)
-        self.lin = nn.Linear(32, 1)
+class Echo(nn.Module):
+    def __init__(self, input, output, size, sparsity=0.05, feedback=0.01):
+        super(Echo, self).__init__()
+        self.input_features = input
+        self.output_features = output
+        self.size = size
 
-    def forward(self, input, future=0):
+        r_r = 2 * np.random.rand(size, size) - 1
+        r_r *= np.random.rand(size, size) < sparsity
+
+        radius = np.abs(np.linalg.eigvals(r_r)).max()
+
+        self.r_o = nn.Linear(size, output).float().cuda()
+        self.r_r = Variable(torch.from_numpy(r_r / radius), requires_grad=False).float().cuda()
+        self.i_r = Variable(2 * torch.rand(input, size) - 1, requires_grad=False).float().cuda()
+        self.o_r = Variable(feedback * (2 * torch.rand(output, size) - 1), requires_grad=False).float().cuda()
+
+
+    def forward(self, input):
+        state = Variable(torch.zeros(self.size), requires_grad=False).float().cuda()
+        out = Variable(torch.zeros(self.output_features), requires_grad=False).float().cuda()
+
         outputs = []
-        h_t = Variable(torch.zeros(input.size(0), 32), requires_grad=False).float().cuda()
-        c_t = Variable(torch.zeros(input.size(0), 32), requires_grad=False).float().cuda()
 
-        for i in range(input.size(1)):
-            h_t, c_t = self.lstm1(input[:, i, :], (h_t, c_t))
-            A = self.lin(h_t)
-            outputs += [A]
-        for i in range(future):
-            h_t, c_t = self.lstm1(A, (h_t, c_t))
-            A = self.lin(h_t)
-            outputs += [A]
-        outputs = torch.stack(outputs, 1).squeeze(2)
+        for i in range(input.size(0)):
+            state = F.tanh(input[i, :, :].matmul(self.i_r) + state.matmul(self.r_r) + out.matmul(self.o_r))
+            out = self.r_o(state)
+            outputs.append(out)
 
-        return outputs
+        return torch.stack(outputs, dim=0)
 
 np.random.seed(0)
 torch.manual_seed(0)
@@ -88,30 +97,31 @@ process_symbols(data)
 train = data[4:]
 test = data[:4]
 
-seq = Sequence()
-seq.float()
-seq.cuda()
+echo = Echo(1, 1, 300)
+echo.float()
+echo.cuda()
 
-optimizer = optim.Adam(seq.parameters())
+optimizer = optim.Adam(echo.r_o.parameters(), lr=0.01)
 
-for i in range(10):
+for i in range(1000):
     batch = []
     for k in train[0:1]:
-        batch.append(k.data[:-100, -1].reshape((-1, 1)))
+        batch.append(k.data[:, -1].reshape((-1, 1)))
     input = Variable(torch.from_numpy(np.stack(batch, axis=0)), requires_grad=True).float().cuda()
 
     def closure():
         optimizer.zero_grad()
-        out = seq(input)
-        loss = torch.nn.functional.mse_loss(input[:, 1:, 0], out[:, :-1])
+        out = echo(input)
+        loss = torch.nn.functional.mse_loss(out[:, :-1, 0], input[:, 1:, 0])
         print('loss:', loss.data[0])
         loss.backward()
         return loss
     optimizer.step(closure)
 
-    out = seq(input, future=100)
+    out = echo(input)
 
-    plt.figure()
-    plt.plot(range(0, k.data.shape[0]), k.data[:, -1])
-    plt.plot(range(0, k.data.shape[0]), out.data.cpu().numpy()[0, :])
-    plt.show()
+    if i % 100 == 0:
+        plt.figure()
+        plt.plot(range(0, k.data.shape[0]), k.data[:, -1])
+        plt.plot(range(0, k.data.shape[0]), out.data.cpu().numpy()[0, :])
+        plt.show()
