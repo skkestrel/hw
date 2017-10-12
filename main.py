@@ -74,13 +74,13 @@ class Echo(nn.Module):
 
     def forward(self, input):
         state = Variable(torch.zeros(self.size), requires_grad=False).float().cuda()
-        out = Variable(torch.zeros(self.output_features), requires_grad=False).float().cuda()
+        out = Variable(torch.zeros(input.size(1), self.output_features), requires_grad=False).float().cuda()
 
         outputs = []
 
         for i in range(input.size(0)):
-            state = F.tanh(input[i, :, :].matmul(self.i_r) + state.matmul(self.r_r) + out.matmul(self.o_r))
-            out = self.r_o(state)
+            state = F.tanh(torch.mm(input[i, :, :], self.i_r) + torch.mv(self.r_r, state) + torch.mm(out, self.o_r)).squeeze()
+            out = self.r_o(state.unsqueeze(0))
             outputs.append(out)
 
         return torch.stack(outputs, dim=0)
@@ -107,21 +107,24 @@ for i in range(1000):
     batch = []
     for k in train[0:1]:
         batch.append(k.data[:, -1].reshape((-1, 1)))
-    input = Variable(torch.from_numpy(np.stack(batch, axis=0)), requires_grad=True).float().cuda()
+    input = Variable(torch.from_numpy(np.stack(batch, axis=1)), requires_grad=True).float().cuda()
 
     def closure():
         optimizer.zero_grad()
         out = echo(input)
-        loss = torch.nn.functional.mse_loss(out[:, :-1, 0], input[:, 1:, 0])
+        # pdb.set_trace()
+        loss = torch.nn.functional.smooth_l1_loss(out[:-1, :, 0], input[1:, :, 0])
         print('loss:', loss.data[0])
         loss.backward()
+        torch.nn.utils.clip_grad_norm(echo.parameters(), 5)
         return loss
     optimizer.step(closure)
 
     out = echo(input)
 
-    if i % 100 == 0:
+    if i % 3 == 0:
         plt.figure()
         plt.plot(range(0, k.data.shape[0]), k.data[:, -1])
-        plt.plot(range(0, k.data.shape[0]), out.data.cpu().numpy()[0, :])
+        plt.plot(range(0, k.data.shape[0]), out.data.cpu().numpy()[:, 0, 0])
         plt.show()
+
