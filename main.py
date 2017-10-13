@@ -97,32 +97,44 @@ process_symbols(data)
 train = data[4:]
 test = data[:4]
 
-echo = Echo(1, 1, 300)
+echo = Echo(6, 20, 300, sparsity=0.05, feedback=0.01)
 echo.float()
 echo.cuda()
 
-optimizer = optim.Adam(echo.r_o.parameters(), lr=0.01)
+lin = nn.Sequential(nn.Tanh(), nn.Linear(20, 10), nn.Tanh(), nn.Linear(10, 1))
+lin.float()
+lin.cuda()
+
+import itertools
+optimizer = optim.Adam(itertools.chain(echo.parameters(), lin.parameters()), lr=0.001)
 
 for i in range(1000):
     batch = []
     for k in train[0:1]:
-        batch.append(k.data[:, -1].reshape((-1, 1)))
+        batch.append(k.data[:2000, :])
     input = Variable(torch.from_numpy(np.stack(batch, axis=1)), requires_grad=True).float().cuda()
 
     def closure():
         optimizer.zero_grad()
-        out = echo(input)
         # pdb.set_trace()
-        loss = torch.nn.functional.smooth_l1_loss(out[:-1, :, 0], input[1:, :, 0])
+        out = echo(input)
+        out = lin(out)
+        loss = torch.nn.functional.smooth_l1_loss(out[:-1, :, 0], input[1:, :, -1])
         print('loss:', loss.data[0])
         loss.backward()
-        torch.nn.utils.clip_grad_norm(echo.parameters(), 5)
+        torch.nn.utils.clip_grad_norm(echo.parameters(), 20)
         return loss
     optimizer.step(closure)
 
-    out = echo(input)
+    batch = []
+    for k in train[0:1]:
+        batch.append(k.data)
+    input = Variable(torch.from_numpy(np.stack(batch, axis=1)), requires_grad=True).float().cuda()
+    input[2000:, :, :] = 0
 
-    if i % 3 == 0:
+    out = echo(input)
+    out = lin(out)
+    if i % 100 == 0:
         plt.figure()
         plt.plot(range(0, k.data.shape[0]), k.data[:, -1])
         plt.plot(range(0, k.data.shape[0]), out.data.cpu().numpy()[:, 0, 0])
